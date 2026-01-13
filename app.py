@@ -9,25 +9,20 @@ st.title("📈 台股百大熱門 ETF 配息排行 & 存股計算機")
 # --- 初始化 Session State ---
 if 'stock_df' not in st.session_state:
     st.session_state.stock_df = pd.DataFrame()
+# 新增：用於儲存使用者選擇的投資組合
+if 'portfolio_list' not in st.session_state:
+    st.session_state.portfolio_list = []
 
-# --- 定義表格樣式設定 (全域變數，讓即時顯示跟最後顯示長一樣) ---
-# 這是為了讓掃描過程中的表格也能漂亮的顯示連結和進度條
+# --- 表格樣式設定 ---
 TABLE_CONFIG = {
     "代號": st.column_config.LinkColumn(
-        "代號", 
-        display_text=r"quote/(.*)", 
-        help="點擊前往 Yahoo 股市" 
+        "代號", display_text=r"quote/(.*)", help="點擊前往 Yahoo 股市"
     ),
-    "配息明細 (近1年)": st.column_config.TextColumn(
-        "近1年配息明細 (元/股)",
-        width="medium"
-    ),
+    "配息明細 (近1年)": st.column_config.TextColumn("近1年配息明細 (元/股)", width="medium"),
     "現價 (元)": st.column_config.NumberColumn(format="$ %.2f"),
     "近一年配息 (每張)": st.column_config.NumberColumn(format="$ %d"),
     "等值月配息 (每張)": st.column_config.NumberColumn(format="$ %d"),
-    "年殖利率 (%)": st.column_config.ProgressColumn(
-        format="%.2f%%", min_value=0, max_value=15
-    ),
+    "年殖利率 (%)": st.column_config.ProgressColumn(format="%.2f%%", min_value=0, max_value=15),
 }
 
 # --- 內建：台股百大熱門 ETF 資料庫 ---
@@ -66,7 +61,7 @@ ETF_DB = {
 
 etf_options = [f"{code} {name}" for code, name in ETF_DB.items()]
 
-# --- 核心函數：抓取股價與配息 (支援即時顯示) ---
+# --- 函數：即時掃描 (第一區塊用) ---
 def get_batch_data(ticker_dict, table_placeholder):
     data = []
     progress_bar = st.progress(0)
@@ -78,175 +73,177 @@ def get_batch_data(ticker_dict, table_placeholder):
         name = ticker_dict[ticker]
         progress_bar.progress((i + 1) / total)
         status_text.text(f"正在分析 ({i+1}/{total}): {name}...")
-        
         try:
             stock = yf.Ticker(ticker)
             price = stock.fast_info.last_price
             if price is None:
                 info = stock.info
                 price = info.get('currentPrice', info.get('previousClose', 0))
-
-            if price is None or price == 0:
-                continue
+            if price is None or price == 0: continue
 
             divs = stock.dividends
             history_str = "無配息"
             total_annual_div = 0
-            
             if not divs.empty:
                 one_year_ago = pd.Timestamp.now(tz=divs.index.tz) - pd.Timedelta(days=365)
                 last_year_divs = divs[divs.index > one_year_ago]
                 total_annual_div = last_year_divs.sum()
-                
                 if not last_year_divs.empty:
                     count = len(last_year_divs)
                     if count >= 10: freq_tag = "月"
                     elif count >= 3: freq_tag = "季"
                     elif count == 2: freq_tag = "半"
                     else: freq_tag = "年"
-                    
                     vals = [f"{x:.2f}".rstrip('0').rstrip('.') for x in last_year_divs.tolist()]
                     history_str = f"{freq_tag}: {'/'.join(vals)}"
 
             div_per_sheet_year = total_annual_div * 1000
             avg_monthly_income_sheet = div_per_sheet_year / 12
             yield_rate = (total_annual_div / price) * 100 if price > 0 else 0
-            
             yahoo_url = f"https://tw.stock.yahoo.com/quote/{ticker}"
 
-            # 新增這一筆資料
             new_row = {
-                "代號": yahoo_url, 
-                "名稱": name,
-                "配息明細 (近1年)": history_str,
-                "現價 (元)": price,
-                "近一年配息 (每張)": int(div_per_sheet_year),
-                "等值月配息 (每張)": int(avg_monthly_income_sheet),
-                "年殖利率 (%)": yield_rate
+                "代號": yahoo_url, "名稱": name, "配息明細 (近1年)": history_str,
+                "現價 (元)": price, "近一年配息 (每張)": int(div_per_sheet_year),
+                "等值月配息 (每張)": int(avg_monthly_income_sheet), "年殖利率 (%)": yield_rate
             }
             data.append(new_row)
-
-            # === 關鍵：每抓到一筆，立刻更新畫面 ===
-            # 將目前的 data 轉成 DataFrame
-            current_df = pd.DataFrame(data)
-            # 依照「等值月配息」初步排序，讓高的排前面
-            current_df = current_df.sort_values(by="等值月配息 (每張)", ascending=False).reset_index(drop=True)
-            
-            # 使用 placeholder 覆蓋原本的表格
-            table_placeholder.dataframe(
-                current_df,
-                column_config=TABLE_CONFIG,
-                use_container_width=True,
-                hide_index=True,
-                height=800
-            )
-
-        except:
-            continue
-            
+            current_df = pd.DataFrame(data).sort_values(by="等值月配息 (每張)", ascending=False).reset_index(drop=True)
+            table_placeholder.dataframe(current_df, column_config=TABLE_CONFIG, use_container_width=True, hide_index=True, height=800)
+        except: continue
     progress_bar.empty()
     status_text.empty()
     return pd.DataFrame(data)
 
 # --- 介面佈局 ---
-tab1, tab2 = st.tabs(["🏆 百大 ETF 排行榜", "💰 存股計算機 (以張為單位)"])
+tab1, tab2 = st.tabs(["🏆 百大 ETF 排行榜", "💰 存股組合計算機"])
 
 # === 第一區塊：排行 ===
 with tab1:
     col_btn, col_info = st.columns([1, 4])
     with col_btn:
         start_scan = st.button("🚀 開始掃描 (即時顯示)")
-    
     with col_info:
         st.write(f"目前內建熱門 ETF 清單：共 **{len(ETF_DB)}** 檔")
 
-    # 1. 建立一個空的「佔位符」(Placeholder)
-    # 這是 Streamlit 的一個特殊容器，我們可以用它來隨時替換內容
     table_placeholder = st.empty()
 
     if start_scan:
-        # 2. 把佔位符傳進去函數裡面
         df = get_batch_data(ETF_DB, table_placeholder)
         if not df.empty:
-            # 掃描完成，存入 Session State
             st.session_state.stock_df = df.sort_values(by="等值月配息 (每張)", ascending=False).reset_index(drop=True)
         else:
-            st.error("掃描失敗，請稍後再試")
+            st.error("掃描失敗")
 
-    # 3. 顯示邏輯：
-    # 如果正在掃描，上面的 get_batch_data 會一直更新 table_placeholder
-    # 如果掃描結束 (或一進來)，我們顯示 Session State 裡的最終結果 (並支援搜尋)
-    
     if not st.session_state.stock_df.empty:
-        # 清除上面的佔位符 (避免重複顯示)
         table_placeholder.empty()
-
-        # 搜尋功能
-        search_term = st.text_input("🔍 搜尋結果 (輸入關鍵字後按 Enter)", "")
-        
+        search_term = st.text_input("🔍 搜尋結果", "")
         df_display = st.session_state.stock_df
         if search_term:
-            df_display = df_display[
-                df_display["名稱"].str.contains(search_term, case=False) | 
-                df_display["代號"].str.contains(search_term, case=False)
-            ]
+            df_display = df_display[df_display["名稱"].str.contains(search_term, case=False) | df_display["代號"].str.contains(search_term, case=False)]
+        st.dataframe(df_display, column_config=TABLE_CONFIG, use_container_width=True, hide_index=True, height=800)
+    elif not start_scan:
+        st.info("👆 請點擊上方按鈕開始載入資料")
 
-        # 最終顯示
-        st.dataframe(
-            df_display,
-            column_config=TABLE_CONFIG, # 使用全域設定
-            use_container_width=True,
-            hide_index=True,
-            height=800 
-        )
-    elif not start_scan: # 如果還沒開始掃描，且也沒有舊資料
-        st.info("👆 請點擊上方按鈕開始載入資料。資料會逐筆顯示，請稍候。")
-
-# === 第二區塊：計算機 ===
+# === 第二區塊：投資組合計算機 ===
 with tab2:
-    st.header("每「張」股票配息試算")
-    col1, col2 = st.columns(2)
+    st.header("🛒 自組 ETF 月配息包")
     
-    with col1:
-        selected_option = st.selectbox("🔍 搜尋並選擇 ETF/股票", etf_options)
+    col_input, col_result = st.columns([1, 2])
+    
+    # --- 左側：新增股票區 ---
+    with col_input:
+        with st.container(border=True):
+            st.subheader("1. 加入股票")
+            # 選擇股票
+            selected_option = st.selectbox("選擇股票", etf_options)
+            
+            # 輸入金額
+            add_money = st.number_input("預計投入金額 (台幣)", value=100000, step=10000, min_value=0)
+            
+            if st.button("➕ 加入清單"):
+                if selected_option and add_money > 0:
+                    with st.spinner("計算中..."):
+                        # 解析代號與名稱
+                        ticker = selected_option.split(" ")[0]
+                        name = selected_option.split(" ")[1]
+                        
+                        # 抓取即時數據
+                        try:
+                            stock = yf.Ticker(ticker)
+                            price = stock.fast_info.last_price
+                            if price is None:
+                                info = stock.info
+                                price = info.get('currentPrice', info.get('previousClose', 0))
+                            
+                            if price > 0:
+                                # 計算張數
+                                price_per_sheet = price * 1000
+                                sheets = int(add_money / price_per_sheet)
+                                real_cost = sheets * price_per_sheet
+                                
+                                # 計算配息
+                                divs = stock.dividends
+                                annual_div_per_share = 0
+                                if not divs.empty:
+                                    one_year_ago = pd.Timestamp.now(tz=divs.index.tz) - pd.Timedelta(days=365)
+                                    annual_div_per_share = divs[divs.index > one_year_ago].sum()
+                                
+                                total_annual_income = annual_div_per_share * 1000 * sheets
+                                avg_monthly_income = total_annual_income / 12
+                                
+                                # 加入 Session State
+                                st.session_state.portfolio_list.append({
+                                    "股票": f"{name} ({ticker})",
+                                    "投入金額": int(real_cost), # 實際購買成本
+                                    "持有張數": f"{sheets} 張",
+                                    "預計年配息": int(total_annual_income),
+                                    "平均月配": int(avg_monthly_income)
+                                })
+                                st.success(f"已加入 {sheets} 張 {name}")
+                            else:
+                                st.error("無法獲取股價")
+                        except Exception as e:
+                            st.error(f"錯誤: {e}")
+                else:
+                    st.warning("請輸入有效金額")
+
+            st.write("---")
+            if st.button("🗑️ 清空所有清單", type="primary"):
+                st.session_state.portfolio_list = []
+                st.rerun()
+
+    # --- 右側：顯示結果區 ---
+    with col_result:
+        st.subheader("2. 您的投資組合預覽")
         
-        if selected_option:
-            ticker = selected_option.split(" ")[0]
-            name = selected_option.split(" ")[1]
-            stock = yf.Ticker(ticker)
-            price = stock.fast_info.last_price
-            if price is None:
-                 info = stock.info
-                 price = info.get('currentPrice', info.get('previousClose', 0))
+        if len(st.session_state.portfolio_list) > 0:
+            # 轉成 DataFrame 顯示
+            df_portfolio = pd.DataFrame(st.session_state.portfolio_list)
             
-            divs = stock.dividends
-            if not divs.empty:
-                one_year_ago = pd.Timestamp.now(tz=divs.index.tz) - pd.Timedelta(days=365)
-                annual_div_share = divs[divs.index > one_year_ago].sum()
-            else:
-                annual_div_share = 0
-
-            price_per_sheet = price * 1000
-            monthly_income_per_sheet = (annual_div_share * 1000) / 12
+            # 顯示表格
+            st.dataframe(
+                df_portfolio,
+                column_config={
+                    "投入金額": st.column_config.NumberColumn(format="$ %d"),
+                    "預計年配息": st.column_config.NumberColumn(format="$ %d"),
+                    "平均月配": st.column_config.NumberColumn(format="$ %d"),
+                },
+                use_container_width=True,
+                hide_index=True
+            )
             
-            st.divider()
-            st.metric("股票名稱", f"{name} ({ticker})")
-            st.metric("目前股價 (每股)", f"${price:.2f}")
-            st.metric("買一張成本", f"${int(price_per_sheet):,}")
-            st.metric("平均每張每月可領", f"${int(monthly_income_per_sheet):,}")
-
-    with col2:
-        investment_amount = st.number_input("💰 預計投入金額 (台幣)", value=100000, step=10000)
-        if selected_option and price > 0:
-            sheets_can_buy = int(investment_amount / price_per_sheet)
-            remainder_money = investment_amount - (sheets_can_buy * price_per_sheet)
-            total_monthly_income = sheets_can_buy * monthly_income_per_sheet
+            # 計算總計
+            total_invest = df_portfolio["投入金額"].sum()
+            total_monthly = df_portfolio["平均月配"].sum()
+            portfolio_yield = (total_monthly * 12 / total_invest * 100) if total_invest > 0 else 0
             
             st.divider()
-            st.subheader("試算結果")
-            st.success(f"可買進 **{sheets_can_buy}** 張")
-            if sheets_can_buy > 0:
-                st.info(f"預估每月總共可領: **NT$ {int(total_monthly_income):,}** 元")
-            else:
-                st.warning("資金不足以買進一張")
-            st.caption(f"剩餘資金: ${int(remainder_money):,} (不足一張)")
+            # 顯示大儀表板
+            m1, m2, m3 = st.columns(3)
+            m1.metric("總投入金額", f"${total_invest:,}")
+            m2.metric("✨ 預估每月領息", f"${total_monthly:,}")
+            m3.metric("組合殖利率", f"{portfolio_yield:.2f}%")
+            
+        else:
+            st.info("👈 請從左側加入股票，開始規劃您的現金流！")
