@@ -1,44 +1,77 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
+import requests
 
 # --- 設定頁面 ---
-st.set_page_config(page_title="台股 ETF 配息神算", layout="wide")
-st.title("📈 台股 ETF 配息排行 & 存股計算機")
+st.set_page_config(page_title="台股 ETF 全市場配息神算", layout="wide")
+st.title("📈 台股全市場 ETF 配息排行 & 存股計算機")
 
-# --- 初始化 Session State (讓資料不會消失) ---
+# --- 初始化 Session State ---
 if 'stock_df' not in st.session_state:
     st.session_state.stock_df = pd.DataFrame()
+if 'etf_list' not in st.session_state:
+    st.session_state.etf_list = {}
 
-# --- 內建 ETF 資料庫 ---
-ETF_DB = {
-    "0050.TW": "元大台灣50", "0056.TW": "元大高股息", "00878.TW": "國泰永續高股息", "00929.TW": "復華台灣科技優息",
-    "00919.TW": "群益台灣精選高息", "00940.TW": "元大台灣價值高息", "00939.TW": "統一台灣高息動能", "006208.TW": "富邦台50",
-    "00713.TW": "元大台灣高息低波", "00900.TW": "富邦特選高股息30", "00881.TW": "國泰台灣5G+", "00692.TW": "富邦公司治理",
-    "0051.TW": "元大中型100", "0052.TW": "富邦科技", "00631L.TW": "元大台灣50正2", "00632R.TW": "元大台灣50反1",
-    "00679B.TW": "元大美債20年", "00687B.TW": "國泰20年美債", "00937B.TW": "群益ESG投等債20+", "00751B.TW": "元大AAA至A公司債",
-    "00720B.TW": "元大投資級公司債", "00725B.TW": "國泰投資級公司債", "00850.TW": "元大臺灣ESG永續", "00923.TW": "群益台灣ESG低碳",
-    "0053.TW": "元大電子", "0055.TW": "元大MSCI金融", "0057.TW": "富邦摩台", "006203.TW": "元大MSCI台灣",
-    "006204.TW": "永豐臺灣加權", "00662.TW": "富邦NASDAQ", "00646.TW": "元大S&P500", "00830.TW": "國泰費城半導體",
-    "00891.TW": "中信關鍵半導體", "00892.TW": "富邦台灣半導體", "00893.TW": "國泰智能電動車", "00895.TW": "富邦未來車",
-    "00905.TW": "FT臺灣Smart", "00918.TW": "大華優利高填息30", "00915.TW": "凱基優選高股息30", "00922.TW": "國泰台灣領袖50",
-    "00927.TW": "群益半導體收益", "00932.TW": "兆豐永續高息等權", "00934.TW": "中信成長高股息", "00935.TW": "野村臺灣新科技50",
-    "00936.TW": "台新永續高息中小"
-}
+# --- 核心函數：抓取全台 ETF 清單 (爬蟲) ---
+@st.cache_data(ttl=86400) # 每天更新一次清單即可
+def fetch_tw_etfs():
+    try:
+        # 來源：台灣證券交易所 本國上市證券國際證券辨識號碼一覽表
+        url = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2"
+        res = requests.get(url)
+        # 讀取 HTML 表格
+        dfs = pd.read_html(res.text)
+        df = dfs[0]
+        
+        # 整理資料：設定欄位名稱 (第0列是標題)
+        df.columns = df.iloc[0]
+        df = df.iloc[1:]
+        
+        # 篩選：只留 "ETF" 相關的
+        # 在「有價證券別」這一欄尋找 ETF
+        target_df = df[df['有價證券別'] == 'ETF']
+        
+        etf_dict = {}
+        for index, row in target_df.iterrows():
+            code_name = row['有價證券代號及名稱']
+            # 格式通常是 "0050 元大台灣50"
+            if " " in code_name:
+                code, name = code_name.split(" ", 1) # 切割代號與名稱
+                # 排除過於冷門或非台幣計價的 (可選)
+                etf_dict[f"{code}.TW"] = name
+            elif "\u3000" in code_name: # 處理全形空白
+                code, name = code_name.split("\u3000", 1)
+                etf_dict[f"{code}.TW"] = name
+                
+        return etf_dict
+    except Exception as e:
+        st.error(f"抓取 ETF 清單失敗: {e}")
+        # 如果爬蟲失敗，回傳備用的基本清單
+        return {
+            "0050.TW": "元大台灣50", "0056.TW": "元大高股息", "00878.TW": "國泰永續高股息",
+            "00929.TW": "復華台灣科技優息", "00919.TW": "群益台灣精選高息", "00940.TW": "元大台灣價值高息"
+        }
 
-etf_options = [f"{code} {name}" for code, name in ETF_DB.items()]
-
-# --- 核心函數 ---
+# --- 核心函數：抓取股價與配息 ---
 def get_batch_data(ticker_dict):
     data = []
     progress_bar = st.progress(0)
     status_text = st.empty()
     total = len(ticker_dict)
     
-    for i, (ticker, name) in enumerate(ticker_dict.items()):
+    # 為了避免 yfinance 被大量請求封鎖，我們分批次或逐個抓取
+    # 這裡示範逐個抓取，但因為全台 ETF 有 200+ 檔，會跑比較久，請耐心等候
+    
+    keys = list(ticker_dict.keys())
+    
+    for i, ticker in enumerate(keys):
+        name = ticker_dict[ticker]
+        
+        # 更新進度條
         progress = (i + 1) / total
         progress_bar.progress(progress)
-        status_text.text(f"正在分析: {name} ({ticker})...")
+        status_text.text(f"正在分析 ({i+1}/{total}): {name} ({ticker})...")
         
         try:
             stock = yf.Ticker(ticker)
@@ -97,29 +130,39 @@ def get_batch_data(ticker_dict):
     status_text.empty()
     return pd.DataFrame(data)
 
+# --- 預先載入 ETF 清單 ---
+if not st.session_state.etf_list:
+    with st.spinner("正在連線證交所更新最新 ETF 清單..."):
+        st.session_state.etf_list = fetch_tw_etfs()
+
+# 轉換成選單用的列表 (給第二區塊用)
+etf_options = [f"{code} {name}" for code, name in st.session_state.etf_list.items()]
+
+
 # --- 介面佈局 ---
-tab1, tab2 = st.tabs(["🏆 前 100 高配息排行", "💰 存股計算機 (以張為單位)"])
+tab1, tab2 = st.tabs(["🏆 全台 ETF 配息排行", "💰 存股計算機 (以張為單位)"])
 
 # === 第一區塊：排行 ===
 with tab1:
-    # 1. 抓取資料按鈕
-    col_btn, col_info = st.columns([1, 4])
+    col_btn, col_count = st.columns([1, 4])
     with col_btn:
-        if st.button("🔄 開始掃描 / 更新資料"):
-            df = get_batch_data(ETF_DB)
+        # 因為數量多 (約240檔)，提醒使用者
+        if st.button("🚀 開始掃描全市場"):
+            st.toast("開始掃描約 200+ 檔 ETF，這需要幾分鐘，請稍候...", icon="⏳")
+            df = get_batch_data(st.session_state.etf_list)
             if not df.empty:
-                # 存入 Session State
-                st.session_state.stock_df = df.sort_values(by="等值月配息 (每張)", ascending=False).head(100).reset_index(drop=True)
+                st.session_state.stock_df = df.sort_values(by="等值月配息 (每張)", ascending=False).reset_index(drop=True)
             else:
                 st.error("無法獲取資料，請稍後再試")
+    
+    with col_count:
+        st.write(f"目前資料庫共有 **{len(st.session_state.etf_list)}** 檔上市 ETF")
 
-    # 2. 顯示搜尋與表格 (只要 Session State 有資料就顯示)
+    # 顯示搜尋與表格
     if not st.session_state.stock_df.empty:
         
-        # 搜尋框
-        search_term = st.text_input("🔍 關鍵字搜尋 (輸入後請按 Enter，例如: 009, 元大, 債)", "")
+        search_term = st.text_input("🔍 搜尋結果 (輸入關鍵字後按 Enter)", "")
         
-        # 篩選邏輯
         df_display = st.session_state.stock_df
         if search_term:
             df_display = df_display[
@@ -127,7 +170,6 @@ with tab1:
                 df_display["代號"].str.contains(search_term, case=False)
             ]
 
-        # 顯示表格
         st.dataframe(
             df_display,
             column_config={
@@ -152,7 +194,7 @@ with tab1:
             height=800 
         )
     else:
-        st.info("👆 請點擊上方按鈕載入最新資料")
+        st.info("👆 全市場掃描較耗時 (約 3~5 分鐘)，點擊按鈕後請喝杯咖啡稍等。")
 
 # === 第二區塊：計算機 ===
 with tab2:
@@ -160,7 +202,9 @@ with tab2:
     col1, col2 = st.columns(2)
     
     with col1:
+        # 這裡現在包含全部 ETF 了
         selected_option = st.selectbox("🔍 搜尋並選擇 ETF/股票", etf_options)
+        
         if selected_option:
             ticker = selected_option.split(" ")[0]
             name = selected_option.split(" ")[1]
