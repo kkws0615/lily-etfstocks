@@ -6,6 +6,10 @@ import pandas as pd
 st.set_page_config(page_title="台股 ETF 配息神算", layout="wide")
 st.title("📈 台股 ETF 配息排行 & 存股計算機")
 
+# --- 初始化 Session State (讓資料不會消失) ---
+if 'stock_df' not in st.session_state:
+    st.session_state.stock_df = pd.DataFrame()
+
 # --- 內建 ETF 資料庫 ---
 ETF_DB = {
     "0050.TW": "元大台灣50", "0056.TW": "元大高股息", "00878.TW": "國泰永續高股息", "00929.TW": "復華台灣科技優息",
@@ -25,7 +29,6 @@ ETF_DB = {
 etf_options = [f"{code} {name}" for code, name in ETF_DB.items()]
 
 # --- 核心函數 ---
-@st.cache_data(ttl=3600)
 def get_batch_data(ticker_dict):
     data = []
     progress_bar = st.progress(0)
@@ -75,11 +78,11 @@ def get_batch_data(ticker_dict):
             avg_monthly_income_sheet = div_per_sheet_year / 12
             yield_rate = (total_annual_div / price) * 100 if price > 0 else 0
 
-            # 產生完整的 Yahoo 網址
+            # Yahoo 網址
             yahoo_url = f"https://tw.stock.yahoo.com/quote/{ticker}"
 
             data.append({
-                "代號": yahoo_url, # 實際值是網址
+                "代號": yahoo_url, 
                 "名稱": name,
                 "配息明細 (近1年)": history_str,
                 "現價 (元)": price,
@@ -99,55 +102,57 @@ tab1, tab2 = st.tabs(["🏆 前 100 高配息排行", "💰 存股計算機 (以
 
 # === 第一區塊：排行 ===
 with tab1:
-    # 移除原本的 st.info，改為直接放按鈕
-    if st.button("🔄 開始掃描並更新排行"):
-        df = get_batch_data(ETF_DB)
-        
-        if not df.empty:
-            sorted_df = df.sort_values(by="等值月配息 (每張)", ascending=False).head(100).reset_index(drop=True)
-            
-            # --- 新增：篩選功能 ---
-            st.write("###") # 增加一點間距
-            search_term = st.text_input("🔍 關鍵字篩選 (輸入名稱或代號，例如: 元大)", "")
-            
-            if search_term:
-                # 篩選邏輯：名稱包含 或是 代號(網址字串)包含 關鍵字
-                # case=False 代表不分大小寫
-                filtered_df = sorted_df[
-                    sorted_df["名稱"].str.contains(search_term, case=False) | 
-                    sorted_df["代號"].str.contains(search_term, case=False)
-                ]
+    # 1. 抓取資料按鈕
+    col_btn, col_info = st.columns([1, 4])
+    with col_btn:
+        if st.button("🔄 開始掃描 / 更新資料"):
+            df = get_batch_data(ETF_DB)
+            if not df.empty:
+                # 存入 Session State
+                st.session_state.stock_df = df.sort_values(by="等值月配息 (每張)", ascending=False).head(100).reset_index(drop=True)
             else:
-                filtered_df = sorted_df
+                st.error("無法獲取資料，請稍後再試")
 
-            # 顯示表格 (使用 filtered_df)
-            st.dataframe(
-                filtered_df,
-                column_config={
-                    "代號": st.column_config.LinkColumn(
-                        "代號", 
-                        display_text=r"quote/(.*)", 
-                        help="點擊前往 Yahoo 股市" 
-                    ),
-                    "配息明細 (近1年)": st.column_config.TextColumn(
-                        "近1年配息明細 (元/股)",
-                        width="medium"
-                    ),
-                    "現價 (元)": st.column_config.NumberColumn(format="$ %.2f"),
-                    "近一年配息 (每張)": st.column_config.NumberColumn(format="$ %d"),
-                    "等值月配息 (每張)": st.column_config.NumberColumn(format="$ %d"),
-                    "年殖利率 (%)": st.column_config.ProgressColumn(
-                        format="%.2f%%", min_value=0, max_value=15
-                    ),
-                },
-                use_container_width=True,
-                hide_index=True,
-                height=800 
-            )
-        else:
-            st.error("無法獲取資料，請稍後再試")
+    # 2. 顯示搜尋與表格 (只要 Session State 有資料就顯示)
+    if not st.session_state.stock_df.empty:
+        
+        # 搜尋框
+        search_term = st.text_input("🔍 關鍵字搜尋 (輸入後請按 Enter，例如: 009, 元大, 債)", "")
+        
+        # 篩選邏輯
+        df_display = st.session_state.stock_df
+        if search_term:
+            df_display = df_display[
+                df_display["名稱"].str.contains(search_term, case=False) | 
+                df_display["代號"].str.contains(search_term, case=False)
+            ]
+
+        # 顯示表格
+        st.dataframe(
+            df_display,
+            column_config={
+                "代號": st.column_config.LinkColumn(
+                    "代號", 
+                    display_text=r"quote/(.*)", 
+                    help="點擊前往 Yahoo 股市" 
+                ),
+                "配息明細 (近1年)": st.column_config.TextColumn(
+                    "近1年配息明細 (元/股)",
+                    width="medium"
+                ),
+                "現價 (元)": st.column_config.NumberColumn(format="$ %.2f"),
+                "近一年配息 (每張)": st.column_config.NumberColumn(format="$ %d"),
+                "等值月配息 (每張)": st.column_config.NumberColumn(format="$ %d"),
+                "年殖利率 (%)": st.column_config.ProgressColumn(
+                    format="%.2f%%", min_value=0, max_value=15
+                ),
+            },
+            use_container_width=True,
+            hide_index=True,
+            height=800 
+        )
     else:
-        st.write("👆 請點擊上方按鈕開始抓取最新資料")
+        st.info("👆 請點擊上方按鈕載入最新資料")
 
 # === 第二區塊：計算機 ===
 with tab2:
